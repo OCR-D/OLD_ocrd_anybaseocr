@@ -4,8 +4,8 @@ ocrd-fork-ocropy >= 1.4.0a3
 ocrd-fork-pylsd >= 0.0.3
 setuptools >= 41.0.0
 torch>=1.1.0
-torchvision
+shapely
 pandas
-keras
-tensorflow-gpu==1.14.0
 scikit-image
+keras
+tensorflow>=2.0

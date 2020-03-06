@@ -4,6 +4,7 @@ import numpy as np
 import warnings
 warnings.filterwarnings('ignore',category=FutureWarning) 
 import tensorflow as tf
+import tensorflow.keras as keras
 from keras.models import load_model
 from keras.preprocessing.image import ImageDataGenerator
 from collections import defaultdict
@@ -11,7 +12,11 @@ from ..constants import OCRD_TOOL
 
 from ocrd import Processor
 from ocrd_modelfactory import page_from_file
-from ocrd_models.ocrd_page import to_xml
+from ocrd_models.ocrd_page import (
+    to_xml,
+    MetadataItemType,
+    LabelsType, LabelType
+)
 from ocrd_utils import getLogger
 from ocrd_models import ocrd_mets
 
@@ -160,6 +165,23 @@ class OcrdAnybaseocrLayoutAnalyser(Processor):
                  
                 if self.logIDs['section'] > self.logIDs['chapter']:
                     self.log_id = self.logIDs['section']
+                    
+                if self.logIDs['chapter']==0 and self.logIDs['section']==0:
+                    
+                    # if both chapter and section dont exist
+                    if self.first is None:
+                        self.first = 'chapter'
+                        parent_node = self.log_map
+                            
+                    log_div = ET.SubElement(parent_node, TAG_METS_DIV)
+                    log_div.set('TYPE', str(i))            
+                    log_div.set('ID', "LOG_"+str(self.logID))
+                      
+                    self.log_links[i] = log_div # store the link 
+                    #if i!='chapter' and i!='section':
+                    self.logIDs[i] = self.logID
+                    self.log_id = self.logID
+                    self.logID += 1                    
                 
                 
             smLink = ET.SubElement(self.link, TAG_METS_SMLINK)
@@ -186,7 +208,6 @@ class OcrdAnybaseocrLayoutAnalyser(Processor):
         if not tf.test.is_gpu_available():
             LOG.error("Your system has no CUDA installed. No GPU detected.")
             sys.exit(1)
-
         model_path = Path(self.parameter['model_path'])
         class_mapper_path = Path(self.parameter['class_mapping_path'])
         if not Path(model_path).is_file():
@@ -198,7 +219,7 @@ class OcrdAnybaseocrLayoutAnalyser(Processor):
             sys.exit(1)
         else:
             
-            LOG.info('Loading model from file ', model_path)
+            LOG.info('Loading model from file %s', model_path)
             model = self.create_model(str(model_path))
             # load the mapping
             pickle_in = open(str(class_mapper_path), "rb")
@@ -208,11 +229,27 @@ class OcrdAnybaseocrLayoutAnalyser(Processor):
             # print("INPUT FILE HERE",self.input_files)
         for (n, input_file) in enumerate(self.input_files):
             pcgts = page_from_file(self.workspace.download_file(input_file))
-            fname = pcgts.get_Page().imageFilename            
-            LOG.info("INPUT FILE %s", fname)
+            fname = pcgts.get_Page().imageFilename
+            page_id = input_file.pageId or input_file.ID
             size = 600, 500
-            img = Image.open(fname)
-            img_array = ocrolib.pil2array(img.resize((500, 600), Image.ANTIALIAS))
+            
+            metadata = pcgts.get_Metadata()
+            metadata.add_MetadataItem(
+                    MetadataItemType(type_="processingStep",
+                                     name=self.ocrd_tool['steps'][0],
+                                     value=TOOL,                                     
+                                     Labels=[LabelsType(#externalRef="parameter",
+                                                        Label=[LabelType(type_=name,
+                                                                         value=self.parameter[name])
+                                                               for name in self.parameter.keys()])]))
+
+            page = pcgts.get_Page()
+            LOG.info("INPUT FILE %s", input_file.pageId or input_file.ID)
+            
+            page_image, page_xywh, page_image_info = self.workspace.image_from_page(page, page_id, feature_selector='binarized')
+
+
+            img_array = ocrolib.pil2array(page_image.resize((500, 600), Image.ANTIALIAS))
             img_array = img_array * 1./255.
             img_array = img_array[np.newaxis, :, :, np.newaxis]            
             results = self.start_test(model, img_array, fname, label_mapping)

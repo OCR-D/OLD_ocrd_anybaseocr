@@ -43,7 +43,7 @@ class OcrdAnybaseocrDewarper(Processor):
         opt.serial_batches = True  # no shuffle
         opt.no_flip = True  # no flip
         opt.rood_dir = self.input_file_grp # make into proper path
-        opt.checkpoints_dir = self.parameter['checkpoint_dir']
+        opt.checkpoints_dir = self.parameter['checkpoint_dir'] 
         opt.dataroot = self.input_file_grp
         opt.name = self.parameter['model_name']
         opt.label_nc = 0
@@ -77,9 +77,9 @@ class OcrdAnybaseocrDewarper(Processor):
         
     def process(self):
         try:
-            self.page_grp, self.image_grp = self.output_file_grp.split(',')
+            page_grp, self.image_grp = self.output_file_grp.split(',')
         except ValueError:
-            self.page_grp = self.output_file_grp
+            page_grp = self.output_file_grp
             self.image_grp = FALLBACK_IMAGE_GRP
             LOG.info("No output file group for images specified, falling back to '%s'", FALLBACK_IMAGE_GRP)
         if not torch.cuda.is_available():
@@ -87,17 +87,24 @@ class OcrdAnybaseocrDewarper(Processor):
             sys.exit(1)
 
         path = self.parameter['pix2pixHD']
-
         if not Path(path).is_dir():
             LOG.error("""\
                 NVIDIA's pix2pixHD was not found at '%s'. Make sure the `pix2pixHD` parameter 
-                in params.json points to the local path to the cloned pix2pixHD repository.
+                in ocrd-tools.json points to the local path to the cloned pix2pixHD repository.
 
                 pix2pixHD can be downloaded from https://github.com/NVIDIA/pix2pixHD
                 """ % path)
             sys.exit(1)
-
+        model_file_path = os.path.join(path, 'checkpoints/latest_net_G.pth')    
+        if not Path(model_file_path).is_file():
+            LOG.error("""\
+                pix2pixHD model file was not found at '%s'. Make sure the this file exists.
+                """ % model_file_path)
+            sys.exit(1)
+                
         opt, model = self.prepare_options(path)
+        
+        
         oplevel = self.parameter['operation_level']
         for (n, input_file) in enumerate(self.input_files):
             page_id = input_file.pageId or input_file.ID
@@ -116,10 +123,11 @@ class OcrdAnybaseocrDewarper(Processor):
 
             page = pcgts.get_Page()
             
-            page_image, page_xywh, page_image_info = self.workspace.image_from_page(page, page_id, feature_filter='dewarped')
+            page_image, page_xywh, page_image_info = self.workspace.image_from_page(page, page_id, feature_filter='dewarped', feature_selector='binarized') # images should be deskewed and cropped
             if oplevel == 'page':
                 dataset = self.prepare_data(opt, page_image, path)
-                self._process_segment(model, dataset, page, page_xywh, page_id, input_file, n)
+                orig_img_size = page_image.size
+                self._process_segment(model, dataset, page, page_xywh, page_id, input_file, orig_img_size, n)
             else:
                 regions = page.get_TextRegion() + page.get_TableRegion() #get all regions?
                 if not regions: 
@@ -129,31 +137,35 @@ class OcrdAnybaseocrDewarper(Processor):
                     # TODO: not tested on regions
                     # TODO: region has to exist as a physical file to be processed by pix2pixHD
                     dataset = self.prepare_data(opt, region_image, path)
-                    self._process_segment(model, dataset, page, region_xywh, region.id, input_file, str(n)+"_"+str(k))
+                    orig_img_size = region_image.size
+                    self._process_segment(model, dataset, page, region_xywh, region.id, input_file, orig_img_size, n)
            
             # Use input_file's basename for the new file -
             # this way the files retain the same basenames:
-            file_id = input_file.ID.replace(self.input_file_grp, self.output_file_grp)            
+            file_id = input_file.ID.replace(self.input_file_grp, page_grp)            
             if file_id == input_file.ID:
-                file_id = concat_padded(self.output_file_grp, n)                
+                file_id = concat_padded(page_grp, n)                
             self.workspace.add_file(
                 ID=file_id,
-                file_grp=self.output_file_grp,
+                file_grp=page_grp,
                 pageId=input_file.pageId,
                 mimetype=MIMETYPE_PAGE,
-                local_filename=os.path.join(self.output_file_grp,
+                local_filename=os.path.join(page_grp,
                                         file_id + '.xml'),
-                content=to_xml(pcgts).encode('utf-8')
+                content=to_xml(pcgts).encode('utf-8'),
+                force=self.parameter['force']
             )
         os.rmdir(self.input_file_grp+"/test_A/") #FIXME: better way of deleting a temp_dir?
         
 
-    def _process_segment(self, model, dataset, page, page_xywh, page_id, input_file, n):
+    def _process_segment(self, model, dataset, page, page_xywh, page_id, input_file, orig_img_size, n):
         for i, data in enumerate(dataset):
+            w,h = orig_img_size
             generated = model.inference(data['label'], data['inst'], data['image'])
             dewarped = array(generated.data[0].permute(1,2,0).detach().cpu())
             bin_array = array(255*(dewarped>ocrolib.midrange(dewarped)),'B')
-            dewarped = ocrolib.array2pil(bin_array)                            
+            dewarped = ocrolib.array2pil(bin_array)
+            dewarped = dewarped.resize((w,h))                        
             
             page_xywh['features'] += ',dewarped'  
             
@@ -164,7 +176,8 @@ class OcrdAnybaseocrDewarper(Processor):
             file_path = self.workspace.save_image_file(dewarped,
                                    file_id,
                                    page_id=page_id,
-                                   file_grp=self.image_grp
+                                   file_grp=self.image_grp,
+                                   force=self.parameter['force']
                 )     
             page.add_AlternativeImage(AlternativeImageType(filename=file_path, comments=page_xywh['features']))
         
